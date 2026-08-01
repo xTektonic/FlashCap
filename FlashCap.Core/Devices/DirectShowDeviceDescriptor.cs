@@ -14,17 +14,17 @@ namespace FlashCap.Devices;
 
 public sealed class DirectShowDeviceDescriptor : CaptureDeviceDescriptor
 {
-    private readonly string devicePath;
+    private readonly DirectShowDeviceLocator locator;
 
     internal DirectShowDeviceDescriptor(
-        string devicePath, string name, string description,
+        DirectShowDeviceLocator locator, string name, string description,
         VideoCharacteristics[] characteristics,
         BufferPool defaultBufferPool) :
         base(name, description, characteristics, defaultBufferPool) =>
-        this.devicePath = devicePath;
+        this.locator = locator;
 
     public override object Identity =>
-        this.devicePath;
+        this.locator.Value;
 
     public override DeviceTypes DeviceType =>
         DeviceTypes.DirectShow;
@@ -35,6 +35,6 @@ public sealed class DirectShowDeviceDescriptor : CaptureDeviceDescriptor
         FrameProcessor frameProcessor,
         CancellationToken ct) =>
         this.InternalOnOpenWithFrameProcessorAsync(
-            new DirectShowDevice(this.devicePath, this.Name),
+            new DirectShowDevice(this.locator, this.Name),
             characteristics, transcodeFormat, frameProcessor, ct);
 }

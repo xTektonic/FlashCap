@@ -10,6 +10,7 @@
 using FlashCap.Internal;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 
 namespace FlashCap.Devices;
@@ -26,22 +27,34 @@ public sealed class DirectShowDevices : CaptureDevices
     {
     }
 
-    protected override IEnumerable<CaptureDeviceDescriptor> OnEnumerateDescriptors() =>
-        NativeMethods_DirectShow.EnumerateDeviceMoniker(
-            NativeMethods_DirectShow.CLSID_VideoInputDeviceCategory).
-        Collect(moniker => moniker.GetPropertyBag() is { } pb ?
-            pb.SafeReleaseBlock(pb =>
-                pb.GetValue("FriendlyName", default(string))?.Trim() is { } n &&
-                (string.IsNullOrEmpty(n) ? "Unknown" : n!) is { } name &&
-                pb.GetValue("DevicePath", default(string))?.Trim() is { } devicePath ?
-                    (CaptureDeviceDescriptor)new DirectShowDeviceDescriptor(
-                        devicePath, name,
-                        pb.GetValue("Description", default(string))?.Trim() ?? $"{name} (DirectShow)",
-                        moniker.BindToObject(
-                            null, null, in NativeMethods_DirectShow.IID_IBaseFilter, out var cs) == 0 &&
-                        cs is NativeMethods_DirectShow.IBaseFilter captureSource ?
-                            captureSource.SafeReleaseBlock(
-                                captureSource => captureSource.EnumeratePins().
+    private CaptureDeviceDescriptor? CreateDescriptor(
+        NativeMethods_DirectShow.IMoniker moniker)
+    {
+        try
+        {
+            return moniker.GetPropertyBag() is { } propertyBag ?
+                propertyBag.SafeReleaseBlock(propertyBag =>
+                {
+                    if (propertyBag.GetValue(
+                        "FriendlyName", default(string))?.Trim() is not { } friendlyName ||
+                        DirectShowDeviceLocator.Create(
+                            moniker, propertyBag) is not { } locator ||
+                        DirectShowDeviceLocator.BindCaptureSource(moniker) is not { } captureSource)
+                    {
+                        return null;
+                    }
+
+                    var name = string.IsNullOrEmpty(friendlyName) ?
+                        "Unknown" : friendlyName;
+
+                    return captureSource.SafeReleaseBlock(
+                        captureSource =>
+                            (CaptureDeviceDescriptor)new DirectShowDeviceDescriptor(
+                                locator, name,
+                                propertyBag.GetValue(
+                                    "Description", default(string))?.Trim() ??
+                                    $"{name} (DirectShow)",
+                                captureSource.EnumeratePins().
                                 Collect(pin =>
                                     pin.GetPinInfo() is { } pinInfo &&
                                     pinInfo.dir == NativeMethods_DirectShow.PIN_DIRECTION.Output ?
@@ -51,9 +64,20 @@ public sealed class DirectShowDevices : CaptureDevices
                                     Collect(format => format.CreateVideoCharacteristics())).
                                 Distinct().
                                 OrderByDescending(vc => vc).
-                                ToArray()) :
-                            ArrayEx.Empty<VideoCharacteristics>(),
-                        this.DefaultBufferPool) :
-                    null) :
-            null);
+                                ToArray(),
+                                this.DefaultBufferPool));
+                }) :
+                null;
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine(ex);
+            return null;
+        }
+    }
+
+    protected override IEnumerable<CaptureDeviceDescriptor> OnEnumerateDescriptors() =>
+        NativeMethods_DirectShow.EnumerateDeviceMoniker(
+            NativeMethods_DirectShow.CLSID_VideoInputDeviceCategory).
+        Collect(this.CreateDescriptor);
 }

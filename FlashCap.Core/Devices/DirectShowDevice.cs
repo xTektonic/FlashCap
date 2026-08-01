@@ -75,12 +75,14 @@ public sealed class DirectShowDevice :
     private NativeMethods_DirectShow.IGraphBuilder? graphBuilder;
     private SampleGrabberSink? sampleGrabberSink;
     private IntPtr pBih;
+    private readonly DirectShowDeviceLocator locator;
 
 #pragma warning disable CS8618
-    internal DirectShowDevice(object identity, string name) :
-        base(identity, name)
+    internal DirectShowDevice(DirectShowDeviceLocator locator, string name) :
+        base(locator.Value, name)
 #pragma warning restore CS8618
     {
+        this.locator = locator;
     }
 
     protected override Task OnInitializeAsync(
@@ -89,24 +91,12 @@ public sealed class DirectShowDevice :
         FrameProcessor frameProcessor,
         CancellationToken ct)
     {
-        var devicePath = (string)this.Identity;
-
         this.transcodeFormat = transcodeFormat;
         this.frameProcessor = frameProcessor;
 
         return this.workingContext!.InvokeAsync(() =>
         {
-            if (NativeMethods_DirectShow.EnumerateDeviceMoniker(
-                NativeMethods_DirectShow.CLSID_VideoInputDeviceCategory).
-                Where(moniker =>
-                    moniker.GetPropertyBag() is { } pb &&
-                    pb.SafeReleaseBlock(pb =>
-                        pb.GetValue("DevicePath", default(string))?.Trim() is { } dp &&
-                        dp.Equals(devicePath))).
-                Collect(moniker =>
-                    moniker.BindToObject(null, null, in NativeMethods_DirectShow.IID_IBaseFilter, out var captureSource) == 0 ?
-                    captureSource as NativeMethods_DirectShow.IBaseFilter : null).
-                FirstOrDefault() is { } captureSource)
+            if (this.locator.FindCaptureSource() is { } captureSource)
             {
                 try
                 {
@@ -131,7 +121,7 @@ public sealed class DirectShowDevice :
                     else
                     {
                         throw new ArgumentException(
-                            $"FlashCap: Couldn't set video format: DevicePath={devicePath}");
+                            $"FlashCap: Couldn't set video format: {this.locator}");
                     }
 
                     ///////////////////////////////
@@ -140,7 +130,7 @@ public sealed class DirectShowDevice :
                     if (this.graphBuilder.AddFilter(captureSource, "Capture source") < 0)
                     {
                         throw new ArgumentException(
-                            $"FlashCap: Couldn't add capture source: DevicePath={devicePath}");
+                            $"FlashCap: Couldn't add capture source: {this.locator}");
                     }
 
                     ///////////////////////////////
@@ -149,18 +139,18 @@ public sealed class DirectShowDevice :
                     if (this.graphBuilder.AddFilter(sampleGrabber, "Sample grabber") < 0)
                     {
                         throw new ArgumentException(
-                            $"FlashCap: Couldn't add sample grabber: DevicePath={devicePath}");
+                            $"FlashCap: Couldn't add sample grabber: {this.locator}");
                     }
 
                     if (sampleGrabber.SetOneShot(false) < 0)
                     {
                         throw new ArgumentException(
-                            $"FlashCap: Couldn't set oneshot mode: DevicePath={devicePath}");
+                            $"FlashCap: Couldn't set oneshot mode: {this.locator}");
                     }
                     if (sampleGrabber.SetBufferSamples(true) < 0)
                     {
                         throw new ArgumentException(
-                            $"FlashCap: Couldn't start sampling: DevicePath={devicePath}");
+                            $"FlashCap: Couldn't start sampling: {this.locator}");
                     }
 
                     ///////////////////////////////
@@ -169,7 +159,7 @@ public sealed class DirectShowDevice :
                     if (this.graphBuilder.AddFilter(nullRenderer, "Null renderer") < 0)
                     {
                         throw new ArgumentException(
-                            $"FlashCap: Couldn't add null renderer: DevicePath={devicePath}");
+                            $"FlashCap: Couldn't add null renderer: {this.locator}");
                     }
 
                     ///////////////////////////////
@@ -178,7 +168,7 @@ public sealed class DirectShowDevice :
                     if (captureGraphBuilder.SetFiltergraph(this.graphBuilder) < 0)
                     {
                         throw new ArgumentException(
-                            $"FlashCap: Couldn't set graph builder: DevicePath={devicePath}");
+                            $"FlashCap: Couldn't set graph builder: {this.locator}");
                     }
 
                     ///////////////////////////////
@@ -191,7 +181,19 @@ public sealed class DirectShowDevice :
                         nullRenderer) < 0)
                     {
                         throw new ArgumentException(
-                            $"FlashCap: Couldn't set render stream: DevicePath={devicePath}");
+                            $"FlashCap: Couldn't set render stream: {this.locator}");
+                    }
+
+                    // Some software capture sources expose timestamps that cannot be
+                    // scheduled against the graph's default reference clock. In that
+                    // case the graph can stall after delivering its first sample.
+                    // Physical DevicePath-backed sources retain the default clock.
+                    if (this.locator.RequiresClocklessGraph &&
+                        (this.graphBuilder is not NativeMethods_DirectShow.IMediaFilter mediaFilter ||
+                         mediaFilter.SetSyncSource(null!) < 0))
+                    {
+                        throw new ArgumentException(
+                            $"FlashCap: Couldn't disable reference clock: {this.locator}");
                     }
 
                     ///////////////////////////////
@@ -199,7 +201,7 @@ public sealed class DirectShowDevice :
                     if (sampleGrabber.GetConnectedMediaType(out var mediaType) < 0)
                     {
                         throw new ArgumentException(
-                            $"FlashCap: Couldn't get media type: DevicePath={devicePath}");
+                            $"FlashCap: Couldn't get media type: {this.locator}");
                     }
 
                     this.pBih = mediaType.AllocateAndGetBih();
@@ -211,7 +213,7 @@ public sealed class DirectShowDevice :
                     if (sampleGrabber.SetCallback(this.sampleGrabberSink, 1) < 0)
                     {
                         throw new ArgumentException(
-                            $"FlashCap: Couldn't get grabbing media type: DevicePath={devicePath}");
+                            $"FlashCap: Couldn't get grabbing media type: {this.locator}");
                     }
                 }
                 catch
@@ -226,7 +228,7 @@ public sealed class DirectShowDevice :
             else
             {
                 throw new ArgumentException(
-                    $"FlashCap: Couldn't find a device: DevicePath={devicePath}");
+                    $"FlashCap: Couldn't find a device: {this.locator}");
             }
         }, ct);
     }
@@ -332,37 +334,30 @@ public sealed class DirectShowDevice :
         IntPtr parentWindow, CancellationToken ct) =>
         this.workingContext!.InvokeAsync(() =>
         {
-            var devicePath = (string)this.Identity;
-
-            if (NativeMethods_DirectShow.EnumerateDeviceMoniker(
-               NativeMethods_DirectShow.CLSID_VideoInputDeviceCategory).
-               Where(moniker =>
-                   moniker.GetPropertyBag() is { } pb &&
-                   pb.SafeReleaseBlock(pb =>
-                       pb.GetValue("DevicePath", default(string))?.Trim() is { } dp &&
-                       dp.Equals(devicePath))).
-               Collect(moniker =>
-                   moniker.BindToObject(null, null, in NativeMethods_DirectShow.IID_IBaseFilter, out var captureSource) == 0 ?
-                   captureSource as NativeMethods_DirectShow.IBaseFilter : null).
-               FirstOrDefault() is { } captureSource)
+            if (this.locator.FindCaptureSource() is { } captureSource)
             {
-                if (captureSource is NativeMethods_DirectShow.ISpecifyPropertyPages specifyPropertyPages &&
-                    captureSource is object sourceAsObject &&
-                    specifyPropertyPages.GetPages(out var pPages) == 0)
+                return captureSource.SafeReleaseBlock(captureSource =>
                 {
-                    try
+                    if (captureSource is NativeMethods_DirectShow.ISpecifyPropertyPages specifyPropertyPages &&
+                        captureSource is object sourceAsObject &&
+                        specifyPropertyPages.GetPages(out var pPages) == 0)
                     {
-                        NativeMethods_DirectShow.OleCreatePropertyFrame(
-                            parentWindow, 0, 0, this.Name, 1, ref sourceAsObject,
-                            pPages.cElems, pPages.pElems, 0, 0, IntPtr.Zero);
+                        try
+                        {
+                            NativeMethods_DirectShow.OleCreatePropertyFrame(
+                                parentWindow, 0, 0, this.Name, 1, ref sourceAsObject,
+                                pPages.cElems, pPages.pElems, 0, 0, IntPtr.Zero);
 
-                        return true;
+                            return true;
+                        }
+                        finally
+                        {
+                            Marshal.FreeCoTaskMem(pPages.pElems);
+                        }
                     }
-                    finally
-                    {
-                        Marshal.FreeCoTaskMem(pPages.pElems);
-                    }
-                }
+
+                    return false;
+                });
             }
 
             return false;
